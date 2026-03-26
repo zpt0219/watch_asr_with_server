@@ -3,6 +3,7 @@ package com.adna.audiorecorderwatch
 import android.Manifest // Used to access the names of standard Android permissions
 import android.annotation.SuppressLint // Used to suppress compiler warnings
 import android.bluetooth.BluetoothAdapter // Represents the local device's Bluetooth radio
+import android.bluetooth.BluetoothClass
 import android.bluetooth.BluetoothDevice // Represents a remote Bluetooth device (the phone)
 import android.bluetooth.BluetoothManager // Used to obtain the BluetoothAdapter
 import android.content.pm.PackageManager // Used to check if permissions are granted or denied
@@ -42,7 +43,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
     private val serviceName = tag
     
     // An arbitrary integer used to identify the result of our permission request popup later in code.
-    private val permissionRequestCode = 111
+    private val permissionRequestCode = 1
 
     // Holds a reference to the active toast so we can cancel it if a new one pops up suddenly.
     private var toastMessage: Toast? = null
@@ -54,7 +55,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
     private lateinit var recordingButton: Button
     
     // The managers we built to handle our background threading and networking.
-    private lateinit var connectionController: BluetoothConnectionController
+    private lateinit var bluetoothConnectionController: BluetoothConnectionController
     private lateinit var audioStreamingController: AudioStreamingController
     
     // Holds the currently selected phone you want the watch to talk to.
@@ -83,7 +84,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
         bluetoothAdapter = bluetoothManager.adapter
         
         // 2. Initialize our custom connection controller class logic.
-        connectionController = BluetoothConnectionController(
+        bluetoothConnectionController = BluetoothConnectionController(
             bluetoothAdapter = bluetoothAdapter,
             logTag = tag,
             appUuid = appUuid,
@@ -97,9 +98,9 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
             // We pass in references (functions) from MainActivity to let the controller update UI seamlessly!
             updateStatus = ::updateStatus,
             showToast = ::showToastMessage,
-            hasActiveConnection = { connectionController.hasActiveConnection() },
+            hasActiveConnection = { bluetoothConnectionController.hasActiveConnection() },
             // Direct callback pipe connecting Audio -> Bluetooth Socket.
-            sendAudioChunk = { bytes, size -> connectionController.sendAudioChunk(bytes, size) },
+            sendAudioChunk = { bytes, size -> bluetoothConnectionController.sendAudioChunk(bytes, size) },
             onStreamingStateChanged = ::updateButtons
         )
 
@@ -116,21 +117,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
 
         // 7. Define what happens when we physically tap the "Connect" button.
         clientButton.setOnClickListener {
-            // Abort if bluetooth isn't ready or hasn't got permissions.
-            if (!ensureBluetoothReady()) {
-                return@setOnClickListener
-            }
-
-            // If we don't know who to connect to yet, show the pairing selection popup.
-            if (targetDevice == null) {
-                scanBluetoothConnection()
-                return@setOnClickListener
-            }
-
-            // Immediately launch the background connection thread for the target device!
-            connectionController.startClient(targetDevice)
-            updateStatus("Connecting to ${targetDevice?.name ?: targetDevice?.address}...")
-            updateButtons()
+            prepareForRecording()
         }
 
         // 8. Define what happens when we tap the "Stream Recording" button.
@@ -163,7 +150,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
             updateButtons()
         } else {
             // Triggers the system permission popup.
-            requestMissingPermissions(includeAudio = false)
+            requestMissingPermissions()
         }
     }
 
@@ -171,7 +158,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
     override fun onDestroy() {
         // We MUST close threads or else the background thread keeps running "zombie" processes forever!
         audioStreamingController.releaseAll()
-        connectionController.stopAll()
+        bluetoothConnectionController.stopAll()
         super.onDestroy()
     }
 
@@ -200,6 +187,27 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
         }
     }
 
+    @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT])
+    private fun prepareForRecording(){
+        // Abort if bluetooth isn't ready or hasn't got permissions.
+        if (!ensureBluetoothReady()) {
+            return
+        }
+
+        // If we don't know who to connect to yet, show the pairing selection popup.
+        if (targetDevice == null) {
+            scanBluetoothConnection()
+            if(targetDevice==null){
+                return
+            }
+        }
+
+        // Immediately launch the background connection thread for the target device!
+        bluetoothConnectionController.startClient(targetDevice)
+        updateStatus("Connecting to ${targetDevice?.name ?: targetDevice?.address}...")
+        updateButtons()
+    }
+
     /**
      * Helper Function: Decides when buttons should be "greyed out" vs "clickable".
      */
@@ -210,7 +218,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
             // The connect button works if bluetooth is enabled.
             clientButton.isEnabled = isEnabled
             // The recording button ONLY works if we have an ACTIVE connection to the phone.
-            recordingButton.isEnabled = isEnabled && connectionController.hasActiveConnection()
+            recordingButton.isEnabled = isEnabled && bluetoothConnectionController.hasActiveConnection()
             // Dynamically morph the text from Start -> Stop.
             recordingButton.text = if (audioStreamingController.isStreamingAudio) "stop recording" else "start recording"
         }
@@ -241,7 +249,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
     /**
      * Analyzes which specific permissions are missing and throws exactly those to the OS popup array.
      */
-    private fun requestMissingPermissions(includeAudio: Boolean) {
+    private fun requestMissingPermissions() {
         val missingPermissions = buildList {
             // Loop over Bluetooth ones:
             bluetoothPermissions.forEach { permission ->
@@ -251,7 +259,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
             }
 
             // Include Audio if specifically needed.
-            if (includeAudio && !hasAudioPermission()) {
+            if (!hasAudioPermission()) {
                 add(Manifest.permission.RECORD_AUDIO)
             }
         }
@@ -267,7 +275,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
      */
     private fun ensureBluetoothReady(): Boolean {
         if (!hasBluetoothPermissions()) {
-            requestMissingPermissions(includeAudio = false)
+            requestMissingPermissions()
             return false
         }
 
@@ -290,15 +298,15 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
         }
 
         // Connection actually active and initialized?
-        if (!connectionController.hasActiveConnection()) {
-            showToastMessage("Connect both phones first") // Tells user to connect
+        if (!bluetoothConnectionController.hasActiveConnection()) {
+            showToastMessage("Connect both devices via bluetooth first") // Tells user to connect
             updateButtons()
             return false
         }
 
         // Do we have legal permissions to capture voice data?
         if (!hasAudioPermission()) {
-            requestMissingPermissions(includeAudio = true)
+            requestMissingPermissions()
             return false
         }
 
@@ -330,9 +338,11 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
     @RequiresPermission(allOf = [Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN])
     private fun scanBluetoothConnection() {
         // Pull already-paired devices natively without doing costly intensive scanning.
-        val bondedDevices = bluetoothAdapter.bondedDevices
-            ?.sortedBy { it.name?.lowercase(Locale.getDefault()) ?: it.address }
-            .orEmpty()
+        val bondedDevices = bluetoothAdapter.bondedDevices.toList().filter{
+            Log.e("TAG", "scanBluetoothConnection: ${it.name}")
+            it.bluetoothClass.deviceClass== BluetoothClass.Device.PHONE_SMART
+        }
+
 
         if (bondedDevices.isEmpty()) {
             targetDevice = null
@@ -341,13 +351,13 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
             return
         }
 
-        // User Quality of Life: Auto-select if only one device is paired!
+        //Auto-select if only one device is paired!
         if (bondedDevices.size == 1) {
             selectTargetDevice(bondedDevices.first())
             return
         }
 
-        // If multiple, show a picker dialog!
+        // Should only have 1 paired phone! if reach this line, show a picker dialog to handle it.
         showDeviceSelectionDialog(bondedDevices)
     }
 
@@ -376,7 +386,7 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
 
         // Pop up the system alert menu
         AlertDialog.Builder(this)
-            .setTitle("Choose paired phone")
+            .setTitle("Choose paired device")
             .setItems(labels) { _, which ->
                 // Called when a user taps an item. `which` is the array index.
                 selectTargetDevice(devices[which])
@@ -405,6 +415,11 @@ class MainActivity : AppCompatActivity(), BluetoothConnectionController.Callback
     override fun onAudioPayloadReceived(payload: ByteArray, size: Int) {
         // Note: The Watch only ever SENDS audio, it doesn't receive audio payload from the phone.
         // Thus, this is an empty no-op.
+    }
+    
+    // The handler when we receive translated Text strings back from the phone
+    override fun onTextPayloadReceived(text: String) {
+        updateStatus(text)
     }
 
     // A generic flag that tells the UI to refresh its states.

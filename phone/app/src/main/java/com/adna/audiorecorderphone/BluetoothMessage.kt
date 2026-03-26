@@ -10,6 +10,9 @@ object BluetoothMessage {
     // 0x01: Tag telling the listener that the incoming bytes are voice audio data.
     const val AUDIO = 1
     
+    // 0x02: Tag telling the listener that the incoming bytes are translated text strings.
+    const val TEXT = 2
+    
     // The strict hardware limit on how many bytes we accept in a single Bluetooth packet.
     // 32 * 1024 equals exactly 32 Kilobytes (32,768 bytes).
     // This protects us from getting overloaded by a corrupted endless packet.

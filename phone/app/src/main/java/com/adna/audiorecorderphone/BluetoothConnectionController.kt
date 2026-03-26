@@ -107,6 +107,13 @@ class BluetoothConnectionController(
     fun sendAudioChunk(audioBytes: ByteArray, size: Int): Boolean {
         return connectedThread?.writeAudioChunk(audioBytes, size) == true
     }
+    
+    /**
+     * Pushes pure text transcript strings onto the connection backwards to the watch.
+     */
+    fun sendTextChunk(text: String): Boolean {
+        return connectedThread?.writeTextChunk(text) == true
+    }
 
     /**
      * Triggered safely when either the Server 'accepts' a connection, or the Client 'connects' to one.
@@ -333,6 +340,32 @@ class BluetoothConnectionController(
                 return true
             } catch (e: IOException) {
                 Log.e(logTag, "Error occurred while sending audio", e)
+                callbacks.showToast("Connection closed. Start server again and reconnect.")
+                cancel()
+                return false
+            }
+        }
+        
+        /**
+         * Pushes translated strings backwards to the connected specific watch device natively.
+         */
+        @Synchronized
+        fun writeTextChunk(text: String): Boolean {
+            if (!mmSocket.isConnected) {
+                callbacks.showToast("Bluetooth connection was lost. Reconnect both phones.")
+                cancel()
+                return false
+            }
+
+            try {
+                val bytes = text.toByteArray(Charsets.UTF_8)
+                mmOutStream.writeByte(BluetoothMessage.TEXT)
+                mmOutStream.writeInt(bytes.size)
+                mmOutStream.write(bytes, 0, bytes.size)
+                mmOutStream.flush()
+                return true
+            } catch (e: IOException) {
+                Log.e(logTag, "Error occurred while sending text chunk", e)
                 callbacks.showToast("Connection closed. Start server again and reconnect.")
                 cancel()
                 return false

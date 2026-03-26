@@ -4,7 +4,6 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.util.Log
 import androidx.annotation.RequiresPermission
@@ -38,6 +37,7 @@ class BluetoothConnectionController(
         fun onConnected(message: String) // Called when a phone connects
         fun onDisconnected(message: String) // Called when the socket dies
         fun onAudioPayloadReceived(payload: ByteArray, size: Int) // Called when we receive audio bytes
+        fun onTextPayloadReceived(text: String) // Called when a string of translated text is sent back
         fun onStateChanged() // Called to tell the UI to refresh its buttons.
         fun showToast(message: String) // Called to show a tiny popup window
     }
@@ -52,7 +52,7 @@ class BluetoothConnectionController(
     private var bluetoothSocket: BluetoothSocket? = null
 
     // Checks whether we currently have a background thread actively sending/receiving bytes.
-    fun hasActiveConnection(): Boolean = connectedThread != null && bluetoothSocket?.isConnected == true
+    fun hasActiveConnection(): Boolean =  connectedThread != null && bluetoothSocket?.isConnected == true
 
     /**
      * Boot up the Client. It chooses exactly who to connect to, and forcefully demands a connection.
@@ -192,67 +192,6 @@ class BluetoothConnectionController(
     }
 
     /**
-     * The background thread that quietly listens and accepts new device connections. 
-     */
-    @SuppressLint("MissingPermission")
-    inner class ServerThread : Thread() {
-        // lazily generate a server socket on the hardware listening to the specific appUuid
-        private val mmServerSocket: BluetoothServerSocket? by lazy(LazyThreadSafetyMode.NONE) {
-            bluetoothAdapter.listenUsingRfcommWithServiceRecord(serviceName, appUuid)
-        }
-
-        override fun run() {
-            var shouldLoop = true
-            Log.d(logTag, "Server thread started")
-
-            // Keep looping as long as we haven't successfully connected, or haven't been cancelled
-            while (shouldLoop) {
-                val socket: BluetoothSocket? = try {
-                    // .accept() completely FREEZES this thread waiting for an inbound connection
-                    // Once someone connects, it returns a usable 'BluetoothSocket'.
-                    mmServerSocket?.accept()
-                } catch (e: IOException) {
-                    // e.g. server socket crashed or was cancelled by user
-                    Log.e(logTag, "Server accept failed", e)
-                    shouldLoop = false
-                    null
-                }
-
-                socket?.also {
-                    // We successfully accepted a connection! Hand it to the controller.
-                    handleConnectedSocket(
-                        it,
-                        "Connected with ${it.remoteDevice?.name ?: it.remoteDevice?.address}"
-                    )
-                    
-                    try {
-                        // We only want ONE connected device entirely. We don't need the server listening anymore!
-                        // That's why we close the server socket.
-                        mmServerSocket?.close()
-                    } catch (e: IOException) {
-                        Log.e(logTag, "Unable to close server socket after accept", e)
-                    }
-                    // Exit the loop cleanly.
-                    shouldLoop = false
-                }
-            }
-
-            callbacks.onStateChanged()
-        }
-
-        // Cancel listening manually
-        fun cancel() {
-            try {
-                mmServerSocket?.close()
-            } catch (e: IOException) {
-                Log.e(logTag, "Unable to close server socket", e)
-            } finally {
-                callbacks.onStateChanged()
-            }
-        }
-    }
-
-    /**
      * The active, living thread that pushes Data back and forth physically.
      */
     inner class ConnectedThread(private val mmSocket: BluetoothSocket) : Thread() {
@@ -271,7 +210,7 @@ class BluetoothConnectionController(
                     val payloadSize = mmInStream.readInt()
 
                     // Sanity check: If they tried to send us 5GB of payload, immediately crash and throw.
-                    if (payloadSize <= 0 || payloadSize > BluetoothMessage.MAX_PAYLOAD_BYTES) {
+                    if (payloadSize <= 0 || payloadSize > Constants.MAX_PAYLOAD_BYTES) {
                         throw IOException("Invalid payload size: $payloadSize")
                     }
 
@@ -283,7 +222,12 @@ class BluetoothConnectionController(
                     // Decide what to do based on the message type
                     when (messageType) {
                         // In this app, watch doesn't receive audio, but we map it just in case! 
-                        BluetoothMessage.AUDIO -> callbacks.onAudioPayloadReceived(payload, payloadSize)
+                        Constants.AUDIO -> callbacks.onAudioPayloadReceived(payload, payloadSize)
+                        // A brand new text packet came in! Decode and fire exactly as expected.
+                        Constants.TEXT -> {
+                            val textString = String(payload, Charsets.UTF_8)
+                            callbacks.onTextPayloadReceived(textString)
+                        }
                         else -> Log.w(logTag, "Unsupported message type: $messageType")
                     }
                 } catch (e: IOException) {
@@ -313,7 +257,7 @@ class BluetoothConnectionController(
 
             try {
                 // 1. We write the MessageType byte (0x01 = AUDIO)
-                mmOutStream.writeByte(BluetoothMessage.AUDIO)
+                mmOutStream.writeByte(Constants.AUDIO)
                 // 2. We write the 4-byte Int (How large the piece of audio is!)
                 mmOutStream.writeInt(size)
                 // 3. We write the entire raw piece of Audio Data
